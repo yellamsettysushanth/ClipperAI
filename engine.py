@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 import wave
+from urllib.parse import urlparse, parse_qs
 from array import array
 from pathlib import Path
 
@@ -17,6 +18,26 @@ ROOT.mkdir(parents=True, exist_ok=True)
 DB = ROOT / "studio.sqlite"
 FF = os.getenv("CLIPPER_FFMPEG", "ffmpeg")
 LOCK = threading.Lock()
+
+CAPTION_STYLES = {
+    "Classic": "FontName=Arial,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Shadow=0,MarginV=30,Alignment=2",
+    "Bold": "FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,Shadow=1,MarginV=70,Alignment=2",
+    "Yellow": "FontName=Arial,FontSize=20,Bold=1,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,Outline=3,Shadow=0,MarginV=70,Alignment=2",
+    "Minimal": "FontName=Arial,FontSize=14,PrimaryColour=&H00FFFFFF,Outline=0,Shadow=0,MarginV=55,Alignment=2",
+}
+
+
+def youtube_url(value):
+    url = urlparse(value.strip())
+    host = (url.hostname or "").lower()
+    if url.scheme != "https" or host not in ("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"):
+        raise ValueError("Paste a valid HTTPS YouTube video or live link.")
+    video_id = url.path.strip("/") if host == "youtu.be" else (parse_qs(url.query).get("v") or [""])[0]
+    if host != "youtu.be" and url.path.startswith(("/live/", "/shorts/")):
+        video_id = url.path.split("/")[2]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("Paste a single YouTube video or live link, not a channel or playlist.")
+    return "https://www.youtube.com/watch?v=" + video_id
 
 
 def connect():
@@ -105,6 +126,20 @@ def process(job):
     j, source, opt = job["id"], Path(job["source"]), json.loads(job["opts"])
     work = ROOT / j
     work.mkdir(exist_ok=True)
+    if opt["mode"] == "Fetch":
+        from yt_dlp import YoutubeDL
+        url = youtube_url(opt["url"])
+        update(j,step="Downloading YouTube source (live streams finish when broadcast ends)",pct=5)
+        source = work / "source.mp4"
+        with YoutubeDL({"format":"bv*[height<=720]+ba/b[height<=720]/best", "merge_output_format":"mp4",
+                        "outtmpl":str(source), "noplaylist":True, "quiet":True,
+                        "continuedl":True, "retries":5, "fragment_retries":5}) as downloader:
+            downloader.download([url])
+        if not source.is_file() or source.stat().st_size == 0:
+            raise ValueError("YouTube download did not create a usable video.")
+        next_opts=dict(opt,mode="Discover",credit=url)
+        enqueue(source,job["name"],next_opts)
+        return "Imported",dict(source=str(source))
     total = duration(source)
     if not math.isfinite(total) or total <= 0:
         raise ValueError("Video has no usable duration.")
@@ -189,7 +224,8 @@ def process(job):
           if fit else "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280")
     vf += ",setsar=1"
     if cues:
-        vf += ",subtitles=captions.srt:force_style='FontName=Arial,FontSize=16,Outline=2,MarginV=30'"
+        style=CAPTION_STYLES.get(opt.get("caption_style","Classic"),CAPTION_STYLES["Classic"])
+        vf += ",subtitles=captions.srt:force_style='"+style+"'"
     ff(["-ss",start,"-i",source,*(["-i",work/"mix.wav"] if voice else []),"-t",length,"-map","0:v:0","-map","1:a:0" if voice else "0:a:0?","-vf",vf,
         "-af","loudnorm=I=-16:TP=-1.5:LRA=11","-c:v","libx264","-threads","3","-preset","veryfast","-crf","22",
         "-pix_fmt","yuv420p","-c:a","aac","-movflags","+faststart","preview.tmp.mp4"],cwd=work)
@@ -212,6 +248,17 @@ def worker():
         try:
             status,result=process(row)
             update(j,status=status,result=json.dumps(result),ended=time.time(),pct=100,step=status)
+            opt=json.loads(row["opts"])
+            if status=="Ready" and opt.get("auto_publish"):
+                try:
+                    import publish
+                    update(j,step="Uploading to YouTube",pct=95)
+                    current=next(r for r in rows() if r["id"]==j)
+                    title=(result["title"][:88]+" #Shorts")[:100]
+                    description="\n".join(x for x in [result["description"],opt.get("post_footer","")] if x)
+                    publish.post(publish.service(interactive=False),current,title,description,opt.get("post_visibility","private"))
+                except Exception as exc:
+                    update(j,status="Needs review",error="Automatic upload failed: "+str(exc),step="Review upload")
         except Exception as exc:
             update(j,status="Failed",error=str(exc),ended=time.time(),step="Retry available")
 

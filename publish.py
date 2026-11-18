@@ -7,7 +7,7 @@ from engine import ROOT, update
 SCOPES=["https://www.googleapis.com/auth/youtube.force-ssl"]
 
 
-def service():
+def service(interactive=True):
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -17,6 +17,8 @@ def service():
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     if not creds or not creds.valid:
+        if not interactive:
+            raise ValueError("Reconnect YouTube in the studio before automatic uploads can resume.")
         flow=InstalledAppFlow.from_client_secrets_file(str(ROOT/"client.json"),SCOPES,
                                                       autogenerate_code_verifier=True)
         creds=flow.run_local_server(host="127.0.0.1",port=0,timeout_seconds=180)

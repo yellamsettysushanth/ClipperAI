@@ -14,6 +14,11 @@
 
 ## Your clips and recordings
 Drop one or more MP4/MOV/MKV/TS/WebM/M4V files into Import, or paste local paths.
+To import a single YouTube video, Short, or live link, paste it and select **Import video
+from this YouTube link**. The app downloads it into the local job folder, then suggests
+highlights for you to choose. A live broadcast finishes downloading when the broadcast
+ends; this version does not generate highlights while it is still live. YouTube may
+restrict some sources, and you should only use footage you have the right to edit.
 For a long stream.ts or a file above 512 MB, use its path. Browser imports are held
 in memory during transfer; use paths for large batches. There is no fixed number
 of jobs. Input copies, previews and job records use disk space under ~/Movies/ClipperAI.
@@ -28,6 +33,8 @@ attach footage you can use. Play the source on your Mac for long-footage review.
 Full frame fits the whole source in a vertical canvas. Center crop fills the
 portrait frame. The app trims quiet clip edges, normalizes audio, and can burn
 timed captions into the MP4. Automatic captions and scores can be wrong.
+Choose Classic, Bold, Yellow, or Minimal captions when importing. In **Review edits**,
+change the style and render a revised draft; the original preview remains available.
 Check names, framing, and whether the highlight makes sense without context.
 The current editor is optimized for footage with audio. For silent footage, turn
 off captions and use Existing clips. Full recording discovery needs audio.
@@ -72,6 +79,14 @@ model-generated shell commands. No paid AI key is required for the core editor.
 5. Keep the app running during transfer. A saved YouTube video ID is reused if
    a later caption or visibility update fails. Review the displayed error and
    your YouTube Studio listings before retrying an interrupted transfer.
+
+After connecting, you can save **Automatic posting for future drafts** in the YouTube
+tab. Only new jobs queued after saving inherit this setting. A job marked Ready uploads
+automatically with its source credit and chosen visibility; jobs needing review stay
+local. Start with Private and check your channel before enabling Public. Automatic
+uploads need a valid saved OAuth token; if it expires without a refresh token, the
+draft stays in Needs review and you can reconnect. Changing the settings does not
+publish already queued drafts.
 
 Video and audio stay on your computer until you approve uploading. Google sign-in
 uses a desktop OAuth client with the youtube.force-ssl scope (required by caption

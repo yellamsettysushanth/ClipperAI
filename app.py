@@ -17,6 +17,8 @@ st.caption("Your editing studio")
 root=e.ROOT
 defaults_path=root/"style.json"
 defaults=json.loads(defaults_path.read_text()) if defaults_path.exists() else {}
+posting_path=root/"posting.json"
+posting=json.loads(posting_path.read_text()) if posting_path.exists() else {}
 intake,queue,review,youtube=st.tabs(["Import","Queue","Review edits","YouTube"])
 
 def store_file(file):
@@ -44,18 +46,20 @@ with intake:
     mode=st.radio("What are you editing?",["Existing clips","Full recordings"],horizontal=True)
     files=st.file_uploader("Drop videos here",type=["mp4","mov","mkv","ts","webm","m4v"],accept_multiple_files=True)
     paths=st.text_area("Or paste local file paths, one per line",placeholder="Use a local path for large recordings.")
-    link=st.text_input("Source link or streamer credit",placeholder="YouTube link, Twitch link, or creator name")
-    if link and not files and not paths.strip():
-        st.info("Attach the original recording or enter its local path to edit this source.")
+    link=st.text_input("Source link or streamer credit",placeholder="YouTube video/live link, Twitch link, or creator name")
+    import_link=st.checkbox("Import video from this YouTube link",value=False,help="A live broadcast downloads until it ends; then highlights are suggested.")
+    if link and not files and not paths.strip() and not import_link:
+        st.info("Attach the original recording, enter its local path, or choose YouTube link import.")
     angle=st.text_input("Story or working title",placeholder="What should the viewer notice?")
     a,b,c=st.columns(3)
     layout=a.selectbox("Vertical layout",["Full frame","Center crop"],index=int(defaults.get("layout")=="Center crop"))
     caps=b.checkbox("Generate captions",defaults.get("captions",True))
     length=c.number_input("Maximum clip length (seconds)",5,3600,45)
-    count=st.number_input("Highlights per recording",1,50,3) if mode=="Full recordings" else 1
+    caption_style=st.selectbox("Caption style",list(e.CAPTION_STYLES),index=list(e.CAPTION_STYLES).index(defaults.get("caption_style","Classic")) if defaults.get("caption_style") in e.CAPTION_STYLES else 0,disabled=not caps)
+    count=st.number_input("Highlights per recording",1,50,3) if mode=="Full recordings" or import_link else 1
     rank_model=st.text_input("Optional Ollama model for transcript-based highlights",placeholder="Leave blank to rank by audio changes") if mode=="Full recordings" else ""
     if st.button("Remember style"):
-        defaults_path.write_text(json.dumps(dict(layout=layout,captions=caps)))
+        defaults_path.write_text(json.dumps(dict(layout=layout,captions=caps,caption_style=caption_style)))
         st.success("Style saved.")
     if st.button("Add to queue",type="primary"):
         try:
@@ -70,11 +74,19 @@ with intake:
             for f in files:
                 p,d=store_file(f)
                 sources.append((p,f.name,d))
+            if import_link:
+                url=e.youtube_url(link)
+                if sources:
+                    raise ValueError("Queue the YouTube link and local files separately.")
+                sources.append((url,"YouTube · "+url.rsplit("=",1)[-1],url))
             if not sources:
                 raise ValueError("Add a recording first.")
             for p,name,d in sources:
-                e.enqueue(p,name,dict(mode="Discover" if mode=="Full recordings" else "Edit",
-                    layout=layout,auto_trim=True,ranking_model=rank_model,captions=caps,length=length,count=count,start=0,credit=link,angle=angle),d)
+                e.enqueue(p,name,dict(mode="Fetch" if import_link else "Discover" if mode=="Full recordings" else "Edit",
+                    url=p if import_link else "",layout=layout,auto_trim=True,ranking_model=rank_model,captions=caps,
+                    caption_style=caption_style,length=length,count=count,start=0,credit=link,angle=angle,
+                    auto_publish=bool(posting.get("enabled") and (root/"token.json").exists()),
+                    post_visibility=posting.get("visibility","private"),post_footer=posting.get("footer","")),d)
             st.success(f"Added {len(sources)} to the queue. Open Queue for progress.")
         except Exception as err:
             st.error(str(err))
@@ -155,14 +167,16 @@ with review:
                 if st.session_state.get("draftscript"+j):
                     st.write(st.session_state["draftscript"+j])
                 instruction=st.text_input("Change the edit",placeholder="Start 3 seconds earlier",key="edit"+j)
+                revised_style=st.selectbox("Caption style",list(e.CAPTION_STYLES),index=list(e.CAPTION_STYLES).index(opt.get("caption_style","Classic")) if opt.get("caption_style","Classic") in e.CAPTION_STYLES else 0,key="style"+j)
                 speech=st.audio_input("Optional voiceover",key="speech"+j)
                 if st.button("Render revised draft",key="render"+j):
                     try:
                         changed=revise(opt,instruction,e.duration(Path(r["source"])),model) if instruction.strip() else dict(opt)
                         if speech:
                             changed["voice"]=str(store_file(speech)[0])
-                        if not instruction.strip() and not speech:
-                            raise ValueError("Add an edit instruction or voiceover.")
+                        changed["caption_style"]=revised_style
+                        if not instruction.strip() and not speech and changed==opt:
+                            raise ValueError("Change the caption style, add an edit instruction, or record a voiceover.")
                         e.enqueue(r["source"],r["name"],changed)
                         st.success("Revision queued. Your previous preview is saved.")
                     except Exception as err:
@@ -189,6 +203,14 @@ with youtube:
                 st.error(str(err))
     if "channel" in st.session_state:
         st.write("Posting to **"+st.session_state.channel[0]+"**")
+        st.subheader("Automatic posting for future drafts")
+        auto=st.checkbox("Automatically upload ready drafts",value=posting.get("enabled",False),help="Only new jobs you queue after saving are uploaded. Drafts needing review stay in the studio.")
+        auto_visibility=st.selectbox("Automatic visibility",["private","unlisted","public"],index=["private","unlisted","public"].index(posting.get("visibility","private")) if posting.get("visibility") in ("private","unlisted","public") else 0)
+        footer=st.text_area("Description footer",value=posting.get("footer",""),help="Source credit from Import is added above this footer.")
+        if st.button("Save automatic posting settings"):
+            posting_path.write_text(json.dumps({"enabled":auto,"visibility":auto_visibility,"footer":footer}))
+            posting_path.chmod(0o600)
+            st.success("Saved for future jobs. Review a private upload before selecting public.")
         choices=[r for r in e.rows() if r["status"] in ("Ready","Needs review","Uploaded","Published","Scheduled")]
         selected=st.multiselect("Select reviewed drafts",choices,format_func=lambda x:x["name"]+" · "+x["id"][:6])
         first=not any(r["video_id"] for r in e.rows())
