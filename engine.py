@@ -63,10 +63,10 @@ def update(j, **values):
                    [*values.values(), j])
 
 
-def enqueue(source, name, opts, fingerprint=""):
-    j = uuid.uuid4().hex
+def enqueue(source, name, opts, fingerprint="", job_id=None):
+    j = job_id or uuid.uuid4().hex
     with connect() as db:
-        db.execute("INSERT INTO jobs (id,name,source,opts,status,step,pct,created,started,ended,result,error,video_id,fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT OR IGNORE INTO jobs (id,name,source,opts,status,step,pct,created,started,ended,result,error,video_id,fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (j,name,str(source),json.dumps(opts),"Queued","Waiting",0,time.time(),None,None,"{}","","",fingerprint))
     return j
 
@@ -107,6 +107,36 @@ def candidates(wav, total, length, limit):
     return chosen
 
 
+def queue_private_edits(job, picks):
+    opts = json.loads(job["opts"])
+    for index, pick in enumerate(picks, 1):
+        child = dict(opts, mode="Edit", start=pick["start"], overnight=True,
+                     auto_publish=True, post_visibility="private", captions=True,
+                     length=min(60, opts["length"]))
+        enqueue(job["source"], f"{job['name']} · moment {index}", child,
+                job_id=f"{job['id']}-short-{index}")
+
+
+def reaction_picks(segments, audio_picks, total, length, count):
+    # Rank transcript reactions with nearby audio emphasis, then fill distinct gaps.
+    reactions = re.compile(r"\b(laugh(?:s|ing|ter)?|haha+|hilarious|funny|no way|did you see|what just happened|can't believe|won|clutch|unbelievable)\b", re.I)
+    ranked = []
+    for begin, end, line, confidence in segments:
+        if confidence < -1 or not reactions.search(line):
+            continue
+        start = max(0, min(total-length, begin-length*.35))
+        emphasis = any(abs(p["start"]-start)<length/2 for p in audio_picks)
+        ranked.append((int(emphasis)+len(reactions.findall(line)), start, line))
+    pool = [dict(start=start, reason=line) for _,start,line in sorted(ranked, reverse=True)]
+    chosen = []
+    for pick in pool + audio_picks:
+        if all(abs(pick["start"]-p["start"]) >= length for p in chosen):
+            chosen.append(pick)
+        if len(chosen) == count:
+            break
+    return chosen
+
+
 def stamp(t):
     ms = round(max(0,t)*1000)
     return f"{ms//3600000:02}:{ms//60000%60:02}:{ms//1000%60:02},{ms%1000:03}"
@@ -133,12 +163,12 @@ def process(job):
         source = work / "source.mp4"
         with YoutubeDL({"format":"bv*[height<=720]+ba/b[height<=720]/best", "merge_output_format":"mp4",
                         "outtmpl":str(source), "noplaylist":True, "quiet":True,
-                        "continuedl":True, "retries":5, "fragment_retries":5}) as downloader:
-            downloader.download([url])
+                        "live_from_start":bool(opt.get("overnight")), "continuedl":True, "retries":5, "fragment_retries":5}) as downloader:
+            info = downloader.extract_info(url, download=True)
         if not source.is_file() or source.stat().st_size == 0:
             raise ValueError("YouTube download did not create a usable video.")
         next_opts=dict(opt,mode="Discover",credit=url)
-        enqueue(source,job["name"],next_opts)
+        enqueue(source,info.get("title") or job["name"],next_opts,job_id=j+"-analysis")
         return "Imported",dict(source=str(source))
     total = duration(source)
     if not math.isfinite(total) or total <= 0:
@@ -149,7 +179,11 @@ def process(job):
         try:
             ff(["-i",source,"-vn","-ac","1","-ar","8000","-c:a","pcm_s16le",audio])
             picks = candidates(audio,total,opt["length"],opt["count"])
-            if opt.get("ranking_model"):
+            if opt.get("overnight"):
+                update(j,step="Scanning speech and reactions across the recording",pct=35)
+                segments,_ = transcribe(audio)
+                picks = reaction_picks(segments,picks,total,opt["length"],opt["count"])
+            elif opt.get("ranking_model"):
                 from edits import suggest
                 update(j,step="Finding stories in the transcript",pct=40)
                 segments,_=transcribe(audio)
@@ -173,6 +207,9 @@ def process(job):
                 picks=chosen or picks
         finally:
             audio.unlink(missing_ok=True)
+        if opt.get("overnight"):
+            queue_private_edits(job,picks)
+            return "Analyzed",dict(picks=picks,duration=total)
         return "Highlights",dict(picks=picks,duration=total)
     start = float(opt.get("start",0))
     length = min(opt.get("length",total),total-start)
@@ -231,8 +268,19 @@ def process(job):
         "-pix_fmt","yuv420p","-c:a","aac","-movflags","+faststart","preview.tmp.mp4"],cwd=work)
     (work/"preview.tmp.mp4").replace(work/"preview.mp4")
     title = opt.get("angle") or next((t for _,_,t,_ in cues if len(t)>12), Path(job["name"]).stem)
+    description = "\n".join(x for x in [opt.get("angle"),opt.get("credit")] if x)
+    if opt.get("overnight"):
+        lines = [t for _,_,t,conf in cues if conf >= -1]
+        quote = next((t for t in lines if len(t.split()) >= 3), "")
+        title = quote or job["name"]
+        description = f"{job['name']} · {int(start)//60}:{int(start)%60:02d} in the recording."
+        if lines:
+            description += "\n\n" + " ".join(lines)[:650]
+        description += "\n\nSource: " + opt.get("credit","")
+        title = title.replace("<","").replace(">","")
+        description = description.replace("<","").replace(">","")
     return ("Needs review" if notes else "Ready"),dict(title=title[:96],notes=notes,language=lang,
-        description=("\n".join(x for x in [opt.get("angle"),opt.get("credit")] if x)),
+        description=description,
         duration=length, start=start,reason=reason)
 
 
@@ -249,7 +297,7 @@ def worker():
             status,result=process(row)
             update(j,status=status,result=json.dumps(result),ended=time.time(),pct=100,step=status)
             opt=json.loads(row["opts"])
-            if status=="Ready" and opt.get("auto_publish"):
+            if opt.get("auto_publish") and (status=="Ready" or (status=="Needs review" and opt.get("overnight"))):
                 try:
                     import publish
                     update(j,step="Uploading to YouTube",pct=95)

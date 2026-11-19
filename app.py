@@ -48,6 +48,8 @@ with intake:
     paths=st.text_area("Or paste local file paths, one per line",placeholder="Use a local path for large recordings.")
     link=st.text_input("Source link or streamer credit",placeholder="YouTube video/live link, Twitch link, or creator name")
     import_link=st.checkbox("Import video from this YouTube link",value=False,help="A live broadcast downloads until it ends; then highlights are suggested.")
+    overnight = import_link and st.checkbox("Overnight Shorts · automatically upload privately to YouTube Studio",
+        help="After the broadcast finishes, scan the recording, render selected highlights with captions, and upload them privately.")
     if link and not files and not paths.strip() and not import_link:
         st.info("Attach the original recording, enter its local path, or choose YouTube link import.")
     angle=st.text_input("Story or working title",placeholder="What should the viewer notice?")
@@ -63,6 +65,8 @@ with intake:
         st.success("Style saved.")
     if st.button("Add to queue",type="primary"):
         try:
+            if overnight and not (root/"token.json").exists():
+                raise ValueError("Open YouTube → Connect your channel and sign in first.")
             sources=[]
             for line in paths.splitlines():
                 if not line.strip():
@@ -83,10 +87,10 @@ with intake:
                 raise ValueError("Add a recording first.")
             for p,name,d in sources:
                 e.enqueue(p,name,dict(mode="Fetch" if import_link else "Discover" if mode=="Full recordings" else "Edit",
-                    url=p if import_link else "",layout=layout,auto_trim=True,ranking_model=rank_model,captions=caps,
-                    caption_style=caption_style,length=length,count=count,start=0,credit=link,angle=angle,
-                    auto_publish=bool(posting.get("enabled") and (root/"token.json").exists()),
-                    post_visibility=posting.get("visibility","private"),post_footer=posting.get("footer","")),d)
+                    overnight=overnight,url=p if import_link else "",layout=layout,auto_trim=True,ranking_model=rank_model,captions=caps,
+                    caption_style=caption_style,length=min(60,length) if overnight else length,count=count,start=0,credit=link,angle=angle,
+                    auto_publish=overnight or bool(posting.get("enabled") and (root/"token.json").exists()),
+                    post_visibility="private" if overnight else posting.get("visibility","private"),post_footer=posting.get("footer","")),d)
             st.success(f"Added {len(sources)} to the queue. Open Queue for progress.")
         except Exception as err:
             st.error(str(err))
@@ -134,6 +138,12 @@ with review:
             st.caption("Select a moment to render and preview. The reason explains why it was suggested.")
             if not res["picks"]:
                 st.info("No clear audio peaks found. Reimport as an existing clip and set a manual trim.")
+            if res["picks"] and st.button("Render all highlights and upload privately"):
+                if (root/"token.json").exists():
+                    e.queue_private_edits(r,res["picks"])
+                    st.success("Private Shorts queued. Follow progress in Queue.")
+                else:
+                    st.error("Connect your channel in the YouTube tab first.")
             for idx,pick in enumerate(res["picks"]):
                 t=pick["start"]
                 if st.button(f"Edit from {int(t)//60}:{int(t)%60:02d} · {pick['reason']}",key=j+str(idx)):
